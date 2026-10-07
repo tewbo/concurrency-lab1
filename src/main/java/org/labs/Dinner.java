@@ -1,37 +1,46 @@
 package org.labs;
 
-import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-public class Dinner {
-    public static void startDinner(int programmersNumber, int dishesNumber, int waitersNumber)  {
-        Table table = new Table(programmersNumber, dishesNumber, waitersNumber);
-        Waiters waiters = new Waiters(waitersNumber, dishesNumber, table);
-        Programmers programmers = new Programmers(programmersNumber, table);
+public final class Dinner {
+    private Dinner() {
+    }
 
-        System.out.println("Starting dinner...");
-        waiters.serve();
-        programmers.start();
-
-        waiters.executorService.shutdown();
-        programmers.executorService.shutdown();
-        try {
-            if (!waiters.executorService.awaitTermination(1, TimeUnit.MINUTES)) {
-                waiters.executorService.shutdownNow();
-                System.err.println("Waiters did not terminate");
-            }
-            if (!programmers.executorService.awaitTermination(1, TimeUnit.MINUTES)) {
-                programmers.executorService.shutdownNow();
-                System.err.println("Programmers did not terminate");
-            }
-        } catch (InterruptedException e) {
-            waiters.executorService.shutdownNow();
-            programmers.executorService.shutdownNow();
-            Thread.currentThread().interrupt();
+    public static List<Integer> serve(DinnerConfig config) throws InterruptedException {
+        Table table = new Table(config.programmersNumber(), config.dishesNumber(), config.waitersNumber());
+        List<Callable<Void>> participants = new ArrayList<>();
+        for (int i = 0; i < config.waitersNumber(); i++) {
+            participants.add(new Waiter(table, config.maxServingMillis()));
         }
-
-        for (int i = 0; i < programmersNumber; i++) {
-            System.out.println(table.eatenDishes.get(i));
+        for (int i = 0; i < config.programmersNumber(); i++) {
+            participants.add(new Programmer(i, table, config.maxEatingMillis()));
         }
+        runAll(participants);
+        return table.eatenDishes();
+    }
 
+    private static void runAll(List<Callable<Void>> tasks) throws InterruptedException {
+        try (ExecutorService executor = Executors.newFixedThreadPool(tasks.size())) {
+            CompletionService<Void> completionService = new ExecutorCompletionService<>(executor);
+            tasks.forEach(completionService::submit);
+            try {
+                for (int i = 0; i < tasks.size(); i++) {
+                    completionService.take().get();
+                }
+            } catch (ExecutionException e) {
+                executor.shutdownNow();
+                throw new IllegalStateException("Dinner participant failed", e.getCause());
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                throw e;
+            }
+        }
     }
 }

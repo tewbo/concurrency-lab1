@@ -1,12 +1,14 @@
 package org.labs;
 
-public class Pause {
-    public static void pause(long maxPauseTime) {
-        long randomPauseTime = (long) (Math.random() * maxPauseTime);
-        try {
-            Thread.sleep(randomPauseTime);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+import java.util.concurrent.ThreadLocalRandom;
+
+public final class Pause {
+    private Pause() {
+    }
+
+    public static void randomPause(long maxMillis) throws InterruptedException {
+        if (maxMillis > 0) {
+            Thread.sleep(ThreadLocalRandom.current().nextLong(maxMillis + 1));
         }
     }
 }

@@ -1,52 +1,168 @@
 package org.labs;
 
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.Comparator;
+import java.util.List;
+import java.util.PriorityQueue;
+import java.util.Queue;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-public class Table {
-    public final int programmersNumber;
-    public final BitSet spoons;
-    public final AtomicInteger dishesRemain;
-    public final AtomicInteger waitersRemain;
-    public final BitSet dishes;
-    public final ReentrantLock lock;
-    public final Comparator<Integer> comparator;
-    public final Queue<Integer> waitingDish;
-    public final List<Integer> eatenDishes;
-    public final Condition hungryProgrammer;
-    public final List<Condition> programmersConditions;
+public final class Table {
+    private final int programmersNumber;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition hungryProgrammer = lock.newCondition();
+    private final List<Condition> hasDish;
+    private final List<Condition> hasPriorityToEat;
+    private final List<Spoon> spoons;
+    private final int[] eatenDishes;
+    private final BitSet dishes;
+    private final BitSet finished;
+    private final Comparator<Integer> eatingOrder;
+    private final Queue<Integer> waitingForDish;
+    private int dishesRemain;
+    private int waitersRemain;
 
-
-    public Table(int programmersNumber, int dishesTotal, int waiters) {
+    public Table(int programmersNumber, int dishesNumber, int waitersNumber) {
         this.programmersNumber = programmersNumber;
-        this.spoons = new BitSet(programmersNumber);
-        this.dishesRemain = new AtomicInteger(dishesTotal);
-        this.waitersRemain = new AtomicInteger(waiters);
+        this.hasDish = newConditions(programmersNumber);
+        this.hasPriorityToEat = newConditions(programmersNumber);
+        this.spoons = IntStream.range(0, programmersNumber).mapToObj(Spoon::new).toList();
+        this.eatenDishes = new int[programmersNumber];
         this.dishes = new BitSet(programmersNumber);
-        this.lock = new ReentrantLock();
-        this.eatenDishes = new ArrayList<>(Collections.nCopies(programmersNumber, 0));
-        this.comparator = Comparator.comparingInt(eatenDishes::get).thenComparingInt(Integer::intValue);
-        this.waitingDish = new PriorityQueue<>(programmersNumber, comparator);
-        this.hungryProgrammer = lock.newCondition();
-        this.programmersConditions = IntStream.range(0, programmersNumber)
-                .mapToObj(_ -> lock.newCondition()).collect(Collectors.toList());
+        this.finished = new BitSet(programmersNumber);
+        this.eatingOrder = Comparator.<Integer>comparingInt(programmer -> eatenDishes[programmer])
+                .thenComparingInt(Integer::intValue);
+        this.waitingForDish = new PriorityQueue<>(programmersNumber, eatingOrder);
+        this.dishesRemain = dishesNumber;
+        this.waitersRemain = waitersNumber;
     }
 
-    public int getLeftSpoon(int programmerPosition) {
-        return programmerPosition;
+    public Spoon leftSpoon(int programmer) {
+        return spoons.get(programmer);
     }
 
-    public int getRightSpoon(int programmerPosition) {
-        return (programmerPosition + 1) % programmersNumber;
+    public Spoon rightSpoon(int programmer) {
+        return spoons.get(rightNeighbour(programmer));
     }
 
-    public enum State {
-        EATING,
-        SERVING,
-        WAITING,
+    public boolean waitForDish(int programmer) throws InterruptedException {
+        lock.lock();
+        try {
+            waitingForDish.add(programmer);
+            hungryProgrammer.signal();
+            while (!dishes.get(programmer)) {
+                if (waitersRemain == 0) {
+                    finished.set(programmer);
+                    signalNeighbours(programmer);
+                    return false;
+                }
+                hasDish.get(programmer).await();
+            }
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void waitForTurn(int programmer) throws InterruptedException {
+        lock.lock();
+        try {
+            waitForNeighbour(programmer, leftNeighbour(programmer));
+            waitForNeighbour(programmer, rightNeighbour(programmer));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void finishEating(int programmer) {
+        lock.lock();
+        try {
+            eatenDishes[programmer]++;
+            dishes.clear(programmer);
+            signalNeighbours(programmer);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public boolean takeDishFromKitchen() {
+        lock.lock();
+        try {
+            if (dishesRemain == 0) {
+                return false;
+            }
+            dishesRemain--;
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public int takeOrder() throws InterruptedException {
+        lock.lock();
+        try {
+            while (waitingForDish.isEmpty()) {
+                hungryProgrammer.await();
+            }
+            return waitingForDish.remove();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void serveDish(int programmer) {
+        lock.lock();
+        try {
+            dishes.set(programmer);
+            hasDish.get(programmer).signal();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public void finishServing() {
+        lock.lock();
+        try {
+            waitersRemain--;
+            hasDish.forEach(Condition::signal);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public List<Integer> eatenDishes() {
+        lock.lock();
+        try {
+            return Arrays.stream(eatenDishes).boxed().toList();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void waitForNeighbour(int programmer, int neighbour) throws InterruptedException {
+        while (!finished.get(neighbour) && eatingOrder.compare(programmer, neighbour) > 0) {
+            hasPriorityToEat.get(neighbour).signal();
+            hasPriorityToEat.get(programmer).await();
+        }
+    }
+
+    private void signalNeighbours(int programmer) {
+        hasPriorityToEat.get(leftNeighbour(programmer)).signal();
+        hasPriorityToEat.get(rightNeighbour(programmer)).signal();
+    }
+
+    private int leftNeighbour(int programmer) {
+        return (programmer + programmersNumber - 1) % programmersNumber;
+    }
+
+    private int rightNeighbour(int programmer) {
+        return (programmer + 1) % programmersNumber;
+    }
+
+    private List<Condition> newConditions(int count) {
+        return IntStream.range(0, count).mapToObj(_ -> lock.newCondition()).toList();
     }
 }
