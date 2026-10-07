@@ -1,7 +1,9 @@
 package org.labs;
 
+import static org.labs.Dinner.startDinner;
+
 public class Main {
     public static void main(String[] args) {
-        System.out.println("Hello, World!");
+        startDinner(2, 1000, 2);
     }
 }
